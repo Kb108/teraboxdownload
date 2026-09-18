@@ -1,6 +1,6 @@
 import os
 import re
-import asyncio
+import requests
 
 from telegram import Update
 from telegram.ext import (
@@ -12,15 +12,14 @@ from telegram.ext import (
 )
 
 # ============================================================
-# BOT TOKEN
+# CONFIG
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-
-# ============================================================
-# TERABOX LINK PATTERN
-# ============================================================
+TERABOX_API = (
+    "https://terabox-worker.robinkumarshakya103.workers.dev/api"
+)
 
 TERABOX_PATTERN = re.compile(
     r"https?://(?:www\.)?"
@@ -46,7 +45,62 @@ async def start(
 
 
 # ============================================================
-# TERABOX MESSAGE
+# TERABOX PROCESSOR
+# ============================================================
+
+def process_terabox(link):
+
+    try:
+
+        response = requests.get(
+            TERABOX_API,
+            params={"url": link},
+            timeout=30,
+        )
+
+        print("Processor status:", response.status_code)
+        print("Processor response:", response.text[:1000])
+
+        if response.status_code != 200:
+            return None, "Processor HTTP Error"
+
+        data = response.json()
+
+        if not data.get("success"):
+            return None, data.get(
+                "message",
+                "TeraBox link process failed."
+            )
+
+        files = data.get("files", [])
+
+        if not files:
+            return None, "No file found."
+
+        return files, None
+
+    except requests.exceptions.Timeout:
+
+        return None, "Processor timeout."
+
+    except requests.exceptions.RequestException as e:
+
+        print("Request error:", e)
+        return None, "Processor connection failed."
+
+    except ValueError:
+
+        print("Invalid JSON response")
+        return None, "Processor returned invalid response."
+
+    except Exception as e:
+
+        print("Processor error:", e)
+        return None, "Unknown processor error."
+
+
+# ============================================================
+# MESSAGE HANDLER
 # ============================================================
 
 async def handle_message(
@@ -59,7 +113,10 @@ async def handle_message(
 
     text = update.message.text or ""
 
-    # Find TeraBox link
+    # --------------------------------------------------------
+    # FIND TERABOX LINK
+    # --------------------------------------------------------
+
     match = TERABOX_PATTERN.search(text)
 
     if not match:
@@ -71,26 +128,76 @@ async def handle_message(
 
         return
 
-    # Clean link
     link = match.group(0).rstrip(".,!?)]}")
 
-    print("TeraBox link received:", link)
+    # --------------------------------------------------------
+    # PROCESSING
+    # --------------------------------------------------------
 
-    # Processing message
-    processing_message = await update.message.reply_text(
+    processing = await update.message.reply_text(
         "🔗 TeraBox Link Received!\n\n"
-        "⏳ Processing হচ্ছে..."
+        "⏳ TeraBox থেকে file information নেওয়া হচ্ছে..."
     )
 
-    # Temporary delay
-    await asyncio.sleep(2)
+    print("TeraBox link:", link)
 
-    await processing_message.edit_text(
-        "✅ TeraBox Link Detected!\n\n"
-        "🔗 Link successfully received.\n\n"
-        "⚙️ Downloader Processor এখনো যুক্ত করা হয়নি।\n\n"
-        "📥 পরের ধাপে TeraBox Downloader যুক্ত করা হবে।"
+    # --------------------------------------------------------
+    # RUN PROCESSOR
+    # --------------------------------------------------------
+
+    files, error = await context.application.run_in_executor(
+        None,
+        process_terabox,
+        link,
     )
+
+    if error:
+
+        await processing.edit_text(
+            "❌ TeraBox Processing Failed\n\n"
+            f"Reason: {error}\n\n"
+            "আবার চেষ্টা করুন।"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # SHOW FILE INFORMATION
+    # --------------------------------------------------------
+
+    message = "✅ TeraBox File Found!\n\n"
+
+    for index, file in enumerate(files[:10], start=1):
+
+        filename = (
+            file.get("file_name")
+            or file.get("filename")
+            or "Unknown File"
+        )
+
+        size = file.get(
+            "size",
+            "Unknown"
+        )
+
+        download_url = (
+            file.get("download_url")
+            or file.get("download_link")
+            or file.get("original_download_url")
+        )
+
+        message += (
+            f"📁 File {index}\n"
+            f"🎬 Name: {filename}\n"
+            f"📦 Size: {size}\n\n"
+        )
+
+        if download_url:
+            message += "🔗 Direct link found ✅\n\n"
+        else:
+            message += "⚠️ Download link পাওয়া যায়নি।\n\n"
+
+    await processing.edit_text(message)
 
 
 # ============================================================
@@ -124,7 +231,6 @@ def main():
         .build()
     )
 
-    # /start
     application.add_handler(
         CommandHandler(
             "start",
@@ -132,7 +238,6 @@ def main():
         )
     )
 
-    # Normal text messages
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -140,20 +245,19 @@ def main():
         )
     )
 
-    # Error handler
     application.add_error_handler(
         error_handler
     )
 
     print(
-        "TeraBox Telegram Bot is running..."
+        "TeraBox Downloader Bot is running..."
     )
 
     application.run_polling()
 
 
 # ============================================================
-# RUN BOT
+# RUN
 # ============================================================
 
 if __name__ == "__main__":
