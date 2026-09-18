@@ -12,10 +12,15 @@ from telegram.ext import (
 )
 
 # ============================================================
-# CONFIG
+# BOT TOKEN
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+
+# ============================================================
+# TERABOX LINK PATTERN
+# ============================================================
 
 TERABOX_PATTERN = re.compile(
     r"https?://(?:www\.)?"
@@ -26,7 +31,7 @@ TERABOX_PATTERN = re.compile(
 
 
 # ============================================================
-# START COMMAND
+# START
 # ============================================================
 
 async def start(
@@ -36,13 +41,12 @@ async def start(
 
     await update.message.reply_text(
         "👋 Welcome to TeraBox Downloader Bot!\n\n"
-        "🔗 আপনার TeraBox Share Link পাঠান।\n\n"
-        "⏳ Link পাওয়ার পর Processing শুরু হবে।"
+        "🔗 আপনার TeraBox Share Link পাঠান।"
     )
 
 
 # ============================================================
-# MESSAGE HANDLER
+# TERABOX MESSAGE
 # ============================================================
 
 async def handle_message(
@@ -55,10 +59,7 @@ async def handle_message(
 
     text = update.message.text or ""
 
-    # --------------------------------------------------------
-    # FIND TERABOX LINK
-    # --------------------------------------------------------
-
+    # Find TeraBox link
     match = TERABOX_PATTERN.search(text)
 
     if not match:
@@ -70,31 +71,25 @@ async def handle_message(
 
         return
 
+    # Clean link
     link = match.group(0).rstrip(".,!?)]}")
-
-    # --------------------------------------------------------
-    # PROCESSING MESSAGE
-    # --------------------------------------------------------
-
-    processing_message = await update.message.reply_text(
-        "🔗 TeraBox Link Received!\n\n"
-        "⏳ Processing হচ্ছে...\n\n"
-        "📎 Link successfully detected."
-    )
 
     print("TeraBox link received:", link)
 
-    # --------------------------------------------------------
-    # TEMPORARY TEST
-    # --------------------------------------------------------
+    # Processing message
+    processing_message = await update.message.reply_text(
+        "🔗 TeraBox Link Received!\n\n"
+        "⏳ Processing হচ্ছে..."
+    )
 
+    # Temporary delay
     await asyncio.sleep(2)
 
     await processing_message.edit_text(
-        "✅ TeraBox Link Received!\n\n"
-        "🔗 Link successfully detected.\n\n"
-        "⚙️ TeraBox Downloader Module এখনো যুক্ত করা হয়নি।\n\n"
-        "পরের ধাপে Downloader Processor যুক্ত করা হবে।"
+        "✅ TeraBox Link Detected!\n\n"
+        "🔗 Link successfully received.\n\n"
+        "⚙️ Downloader Processor এখনো যুক্ত করা হয়নি।\n\n"
+        "📥 পরের ধাপে TeraBox Downloader যুক্ত করা হবে।"
     )
 
 
@@ -158,7 +153,7 @@ def main():
 
 
 # ============================================================
-# RUN
+# RUN BOT
 # ============================================================
 
 if __name__ == "__main__":
