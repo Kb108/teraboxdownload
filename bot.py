@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-import aiohttp
+import requests
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -14,536 +14,308 @@ from telegram.ext import (
     filters,
 )
 
-# ============================================================
-# SETTINGS
-# ============================================================
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# TeraBox processor
-PROCESSOR_URL = "https://terabox-gateway.onrender.com/api"
+# Current TeraBox API found from an active GitHub project
+PROCESSOR_URL = "https://terabox-worker.robinkumarshakya103.workers.dev/api"
 
-# 1 hour
-DELETE_AFTER = 60 * 60
-
-# TeraBox link detector
-TERABOX_PATTERN = re.compile(
-    r"https?://(?:www\.)?"
-    r"(?:terabox\.com|teraboxapp\.com|1024terabox\.com)"
-    r"/\S+",
-    re.IGNORECASE,
-)
+DELETE_AFTER = 60 * 60  # 1 hour
 
 
-# ============================================================
-# /start
-# ============================================================
+def is_terabox_url(text: str) -> bool:
+    if not text:
+        return False
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+    text = text.lower()
 
-    await update.message.reply_text(
-        "👋 Welcome to TeraBox Downloader Bot!\n\n"
-        "🔗 আপনার TeraBox Share Link পাঠান।\n\n"
-        "⚡ Public TeraBox link হলে আমি file process করার চেষ্টা করব।"
-    )
+    domains = [
+        "terabox.com",
+        "1024terabox.com",
+        "terabox.app",
+        "teraboxshare.com",
+        "teraboxlink.com",
+        "terasharelink.com",
+        "terafileshare.com",
+        "terasharefile.com",
+        "freeterabox.com",
+        "teraboxapp.com",
+    ]
 
-
-# ============================================================
-# FIND TERABOX LINK
-# ============================================================
-
-def find_terabox_link(text):
-
-    match = TERABOX_PATTERN.search(text)
-
-    if not match:
-        return None
-
-    return match.group(0).rstrip(
-        ".,!?)]}>\"'"
-    )
+    return any(domain in text for domain in domains)
 
 
-# ============================================================
-# PROCESS TERABOX LINK
-# ============================================================
+def get_terabox_info(url: str):
+    """
+    Ask the TeraBox API for file information and direct download link.
+    """
 
-async def process_terabox(link):
-
-    timeout = aiohttp.ClientTimeout(
-        total=120
-    )
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/139.0 Safari/537.36"
-        )
-    }
-
-    params = {
-        "url": link
-    }
-
-    async with aiohttp.ClientSession(
-        timeout=timeout,
-        headers=headers
-    ) as session:
-
-        async with session.get(
-            PROCESSOR_URL,
-            params=params
-        ) as response:
-
-            result = await response.text()
-
-            print(
-                "PROCESSOR STATUS:",
-                response.status
+    response = requests.get(
+        PROCESSOR_URL,
+        params={"url": url},
+        timeout=(15, 60),
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/120 Safari/537.36"
             )
+        },
+    )
 
-            print(
-                "PROCESSOR RESPONSE:",
-                result[:3000]
-            )
+    print("Processor HTTP status:", response.status_code)
+    print("Processor response:", response.text[:3000])
 
-            if response.status != 200:
+    response.raise_for_status()
 
-                raise Exception(
-                    f"Processor HTTP {response.status}"
-                )
+    data = response.json()
 
-            try:
-
-                data = await response.json(
-                    content_type=None
-                )
-
-            except Exception:
-
-                raise Exception(
-                    "Processor JSON response পাওয়া যায়নি."
-                )
-
-            return data
-
-
-# ============================================================
-# EXTRACT FILE
-# ============================================================
-
-def extract_file(data):
-
-    if not isinstance(data, dict):
-
+    if not data.get("success"):
         raise Exception(
-            "Invalid processor response."
+            data.get("message")
+            or data.get("error")
+            or "Processor could not resolve the TeraBox link."
         )
 
-    # Different possible response names
-    files = data.get("files")
+    files = data.get("files") or data.get("data")
 
-    if isinstance(files, list) and len(files) > 0:
+    if not files:
+        raise Exception("No file information was returned by the processor.")
 
-        file_info = files[0]
+    if isinstance(files, dict):
+        files = [files]
 
-    else:
+    file_info = files[0]
 
-        file_info = data
-
-    file_name = (
+    filename = (
         file_info.get("filename")
         or file_info.get("file_name")
         or file_info.get("name")
-        or "terabox_file"
+        or "TeraBox_File"
     )
 
     download_url = (
-        file_info.get("download_url")
-        or file_info.get("download_link")
-        or file_info.get("dlink")
+        file_info.get("download_link")
         or file_info.get("direct_link")
+        or file_info.get("dlink")
         or file_info.get("url")
     )
 
     if not download_url:
+        raise Exception("Processor did not return a download URL.")
 
-        raise Exception(
-            "Processor থেকে download link পাওয়া যায়নি."
-        )
-
-    return file_name, download_url
+    return filename, download_url
 
 
-# ============================================================
-# DOWNLOAD FILE
-# ============================================================
+def download_file(download_url: str, filename: str):
+    """
+    Download the file to temporary GitHub Actions storage.
+    """
 
-async def download_file(
-    download_url,
-    output_file,
-    status_message
-):
+    safe_name = Path(filename).name
 
-    timeout = aiohttp.ClientTimeout(
-        total=60 * 60
-    )
+    temp_dir = tempfile.mkdtemp(prefix="terabox_")
+    file_path = os.path.join(temp_dir, safe_name)
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/139.0 Safari/537.36"
-        ),
-        "Referer": "https://www.terabox.com/"
-    }
+    print("Downloading:", safe_name)
 
-    async with aiohttp.ClientSession(
-        timeout=timeout,
-        headers=headers
-    ) as session:
+    with requests.get(
+        download_url,
+        stream=True,
+        timeout=(20, 120),
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/120 Safari/537.36"
+            )
+        },
+    ) as response:
 
-        async with session.get(
-            download_url,
-            allow_redirects=True
-        ) as response:
+        response.raise_for_status()
 
-            if response.status not in (
-                200,
-                206
-            ):
+        total = 0
 
-                raise Exception(
-                    f"Download HTTP {response.status}"
-                )
+        with open(file_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+                    total += len(chunk)
 
-            downloaded = 0
+        print("Downloaded bytes:", total)
 
-            with open(
-                output_file,
-                "wb"
-            ) as file:
-
-                async for chunk in response.content.iter_chunked(
-                    1024 * 1024
-                ):
-
-                    file.write(chunk)
-
-                    downloaded += len(chunk)
-
-                    # Update every 20 MB
-                    if downloaded % (
-                        20 * 1024 * 1024
-                    ) < 1024 * 1024:
-
-                        try:
-
-                            await status_message.edit_text(
-                                "⬇️ File Download হচ্ছে...\n\n"
-                                f"📦 Downloaded: "
-                                f"{downloaded / 1024 / 1024:.1f} MB"
-                            )
-
-                        except Exception:
-                            pass
+    return file_path
 
 
-# ============================================================
-# DELETE FILE AFTER 1 HOUR
-# ============================================================
-
-async def delete_after_one_hour(
+async def delete_later(
     bot,
-    chat_id,
-    message_id,
-    file_path
+    chat_id: int,
+    message_id: int,
+    file_path: str,
 ):
+    """
+    Delete Telegram message and temporary file after 1 hour.
+    """
 
-    await asyncio.sleep(
-        DELETE_AFTER
-    )
+    await asyncio.sleep(DELETE_AFTER)
 
-    # Delete Telegram message
     try:
-
         await bot.delete_message(
             chat_id=chat_id,
-            message_id=message_id
+            message_id=message_id,
         )
-
-        print(
-            "Telegram message deleted."
-        )
-
+        print("Telegram file message deleted.")
     except Exception as e:
+        print("Telegram delete error:", e)
 
-        print(
-            "Telegram delete error:",
-            e
-        )
-
-    # Delete server file
     try:
-
         if os.path.exists(file_path):
+            os.remove(file_path)
 
-            os.remove(
-                file_path
-            )
+        parent = os.path.dirname(file_path)
 
-            print(
-                "Temporary file deleted."
-            )
+        if os.path.isdir(parent):
+            try:
+                os.rmdir(parent)
+            except OSError:
+                pass
+
+        print("Temporary file deleted.")
 
     except Exception as e:
-
-        print(
-            "Temporary file delete error:",
-            e
-        )
+        print("Temporary file delete error:", e)
 
 
-# ============================================================
-# MESSAGE HANDLER
-# ============================================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    await update.message.reply_text(
+        "👋 Welcome!\n\n"
+        "Send me a public TeraBox share link.\n\n"
+        "I will try to process the file and send it here."
+    )
+
 
 async def handle_message(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    if not update.message:
+    if not update.message or not update.message.text:
         return
 
-    text = update.message.text or ""
+    text = update.message.text.strip()
 
-    link = find_terabox_link(
-        text
-    )
-
-    if not link:
-
+    if not is_terabox_url(text):
         await update.message.reply_text(
-            "❌ Valid TeraBox link পাওয়া যায়নি.\n\n"
-            "একটি public TeraBox Share Link পাঠান।"
+            "❌ Please send a valid public TeraBox share link."
         )
-
         return
 
-    # --------------------------------------------------------
-    # PROCESSING
-    # --------------------------------------------------------
-
-    status_message = await update.message.reply_text(
+    processing_message = await update.message.reply_text(
         "🔗 TeraBox Link Received!\n\n"
-        "⏳ TeraBox থেকে file information নেওয়া হচ্ছে..."
+        "⏳ Getting file information..."
     )
 
-    temp_path = None
+    file_path = None
 
     try:
 
-        # ----------------------------------------------------
-        # PROCESS
-        # ----------------------------------------------------
-
-        data = await process_terabox(
-            link
+        # STEP 1
+        await processing_message.edit_text(
+            "🔗 TeraBox Link Received!\n\n"
+            "⏳ Connecting to TeraBox processor..."
         )
 
-        file_name, download_url = extract_file(
-            data
+        filename, download_url = await asyncio.to_thread(
+            get_terabox_info,
+            text,
         )
 
-        print(
-            "FILE NAME:",
-            file_name
+        print("Filename:", filename)
+        print("Download URL received.")
+
+        # STEP 2
+        await processing_message.edit_text(
+            "📁 File found!\n\n"
+            f"📄 {filename}\n\n"
+            "⬇️ Downloading file..."
         )
 
-        print(
-            "DOWNLOAD URL FOUND"
-        )
-
-        await status_message.edit_text(
-            "✅ File Information পাওয়া গেছে!\n\n"
-            f"📄 File: {file_name}\n\n"
-            "⬇️ এখন Download হচ্ছে..."
-        )
-
-        # ----------------------------------------------------
-        # TEMP FILE
-        # ----------------------------------------------------
-
-        extension = Path(
-            file_name
-        ).suffix
-
-        temp = tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=extension
-        )
-
-        temp.close()
-
-        temp_path = temp.name
-
-        # ----------------------------------------------------
-        # DOWNLOAD
-        # ----------------------------------------------------
-
-        await download_file(
+        file_path = await asyncio.to_thread(
+            download_file,
             download_url,
-            temp_path,
-            status_message
+            filename,
         )
 
-        # ----------------------------------------------------
-        # CHECK FILE
-        # ----------------------------------------------------
-
-        if not os.path.exists(
-            temp_path
-        ):
-
-            raise Exception(
-                "Downloaded file পাওয়া যায়নি."
-            )
-
-        file_size = os.path.getsize(
-            temp_path
+        # STEP 3
+        await processing_message.edit_text(
+            "📤 Uploading file to Telegram..."
         )
 
-        if file_size <= 0:
-
-            raise Exception(
-                "Downloaded file empty."
-            )
-
-        # ----------------------------------------------------
-        # TELEGRAM UPLOAD
-        # ----------------------------------------------------
-
-        await status_message.edit_text(
-            "📤 Download complete!\n\n"
-            "⏳ এখন Telegram-এ file পাঠানো হচ্ছে..."
-        )
-
-        with open(
-            temp_path,
-            "rb"
-        ) as document:
+        with open(file_path, "rb") as document:
 
             sent_message = await update.message.reply_document(
                 document=document,
-                filename=file_name,
                 caption=(
-                    "🎬 TeraBox Downloader\n\n"
-                    f"📄 {file_name}\n"
-                    f"📦 {file_size / 1024 / 1024:.2f} MB\n\n"
-                    "⏰ এই file 1 ঘণ্টা পরে automatically "
-                    "delete হবে।"
-                )
+                    f"📁 {filename}\n\n"
+                    "⏰ This file will be automatically deleted "
+                    "after 1 hour."
+                ),
             )
 
-        # ----------------------------------------------------
-        # DELETE PROCESSING MESSAGE
-        # ----------------------------------------------------
-
+        # Remove processing message
         try:
-
-            await status_message.delete()
-
+            await processing_message.delete()
         except Exception:
             pass
 
-        # ----------------------------------------------------
-        # SCHEDULE DELETE
-        # ----------------------------------------------------
-
+        # STEP 4
         asyncio.create_task(
-            delete_after_one_hour(
+            delete_later(
                 context.bot,
                 update.effective_chat.id,
                 sent_message.message_id,
-                temp_path
+                file_path,
             )
         )
 
-        print(
-            "SUCCESS:",
-            file_name
+    except requests.exceptions.Timeout:
+
+        await processing_message.edit_text(
+            "❌ Processor Timeout!\n\n"
+            "TeraBox processor did not respond in time.\n\n"
+            "Please try again with another public TeraBox link."
         )
+
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+
+    except requests.exceptions.HTTPError as e:
+
+        await processing_message.edit_text(
+            "❌ Processor HTTP Error.\n\n"
+            f"Status: {getattr(e.response, 'status_code', 'Unknown')}\n\n"
+            "Please try again later."
+        )
+
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
 
     except Exception as e:
 
-        print(
-            "TERABOX ERROR:",
-            repr(e)
+        print("BOT ERROR:", repr(e))
+
+        await processing_message.edit_text(
+            "❌ Download failed.\n\n"
+            f"Reason: {str(e)[:800]}"
         )
 
-        # Delete temporary file if error
-        if temp_path:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
 
-            try:
-
-                if os.path.exists(
-                    temp_path
-                ):
-
-                    os.remove(
-                        temp_path
-                    )
-
-            except Exception:
-                pass
-
-        try:
-
-            await status_message.edit_text(
-                "❌ TeraBox file process করা যায়নি.\n\n"
-                f"Error:\n{str(e)[:1000]}\n\n"
-                "🔗 অন্য একটি public TeraBox link দিয়ে চেষ্টা করুন।"
-            )
-
-        except Exception:
-            pass
-
-
-# ============================================================
-# ERROR HANDLER
-# ============================================================
-
-async def error_handler(
-    update,
-    context
-):
-
-    print(
-        "BOT ERROR:",
-        repr(context.error)
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
 
     if not BOT_TOKEN:
-
         raise RuntimeError(
-            "BOT_TOKEN পাওয়া যায়নি.\n"
-            "GitHub Secrets-এ BOT_TOKEN check করুন."
+            "BOT_TOKEN is missing. Add BOT_TOKEN in GitHub Secrets."
         )
 
     application = (
@@ -553,33 +325,27 @@ def main():
     )
 
     application.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+        CommandHandler("start", start)
     )
 
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            handle_message
+            handle_message,
         )
     )
 
-    application.add_error_handler(
-        error_handler
+    print("====================================")
+    print("TeraBox Telegram Bot Started")
+    print("Force Join: DISABLED")
+    print("Auto Delete: 1 hour")
+    print("Processor:", PROCESSOR_URL)
+    print("====================================")
+
+    application.run_polling(
+        drop_pending_updates=True
     )
 
-    print(
-        "TeraBox Downloader Bot is running..."
-    )
-
-    application.run_polling()
-
-
-# ============================================================
-# START BOT
-# ============================================================
 
 if __name__ == "__main__":
     main()
